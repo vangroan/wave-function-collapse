@@ -1,0 +1,20 @@
+[package]
+name = "wave_function_collapse"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.9"
+wave_framework = { path = "crates/wave_framework" }
+
+[workspace]
+# New feature resolver is needed by wgpu,
+# otherwise it will attempt to compile the
+# Metal backend on Windows.
+resolver = "2"
+
+members = [
+    "crates/wave_algo",
+    "crates/wave_framework",
+]
