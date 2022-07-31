@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 eframe = "0.18" # egui framework
 log = "0.4"
+xml-rs = "0.8"

@@ -1,5 +1,9 @@
 use eframe::egui;
 
+mod loader;
+
+pub use loader::load_tileset_file;
+
 pub struct WaveApp {
     name: String,
     age: i32,
