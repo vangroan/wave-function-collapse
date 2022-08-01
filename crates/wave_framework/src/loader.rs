@@ -1,12 +1,11 @@
 //! Tileset loader.
-use std::{collections::HashMap, fs, io, path::Path};
+#![allow(dead_code)] // remove when implementation is done
+use std::{collections::HashMap, fmt, fs, io, path::Path};
 use xml::{
     attribute::OwnedAttribute,
     name::OwnedName,
     reader::{EventReader, XmlEvent},
 };
-
-use crate::option;
 
 /// Load a tileset from the given XML file.
 // TODO: return Result
@@ -43,6 +42,14 @@ const SYM_L: &str = "L";
 const SYM_F: &str = "F";
 const SYM_DIAG: &str = "\\";
 
+/// Number of possible directions around a tile.
+/// Up, down, left, right.
+const DIRECTION_N: usize = 4;
+
+/// Maximum number of possible tile orientation cases.
+/// Tile can be rotated to every direction, and flipped (mirrored).
+const CASE_N: usize = DIRECTION_N * 2;
+
 #[derive(Default)]
 pub struct Tileset {
     tiles: Vec<Tile>,
@@ -51,6 +58,7 @@ pub struct Tileset {
 pub struct Tile {}
 
 /// Current state of the parser as it traverses the XML tree.
+#[derive(Clone, Copy)]
 enum XmlState {
     Off,
     Root,
@@ -70,14 +78,41 @@ impl<'a> NeighKind<'a> {
             &NeighKind::Complex { tile, .. } => tile,
         }
     }
+
+    fn num(&self) -> usize {
+        match self {
+            // Implicitly when no number is specified the index is 0
+            &NeighKind::Tile(_) => 0,
+            &NeighKind::Complex { num, .. } => {
+                num.parse::<usize>().expect("failed parsing tile number")
+            }
+        }
+    }
+}
+
+impl<'a> fmt::Display for NeighKind<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Mimic attribute from original XML input.
+        match self {
+            &NeighKind::Tile(tile) => write!(f, "{}", tile),
+            &NeighKind::Complex { tile, num } => write!(f, "{} {}", tile, num),
+        }
+    }
 }
 
 struct XmlParser<R: io::Read> {
     reader: EventReader<R>,
-    state: XmlState,
+    stack: Vec<XmlState>,
+    /// Current depth in the XML tree.
     depth: i32,
     action: Vec<[i32; 8]>,
-    offsets: HashMap<String, usize>, // firstOccurrence
+    /// Mapping of tile names to their offset into
+    /// the `action` vector. This can be used to
+    /// lookup a tile's actions.
+    ///
+    /// Called `firstOccurrence` in reference codebase.
+    offsets: HashMap<String, usize>,
+    /// Resulting tileset that's being built up by the parser.
     tileset: Tileset,
 }
 
@@ -85,12 +120,24 @@ impl<R: io::Read> XmlParser<R> {
     fn new(reader: R) -> Self {
         XmlParser {
             reader: EventReader::new(reader),
-            state: XmlState::Off,
+            stack: vec![XmlState::Off],
             depth: 0,
             action: vec![],
             offsets: HashMap::new(),
             tileset: Tileset::default(),
         }
+    }
+
+    fn state(&self) -> XmlState {
+        self.stack.last().cloned().unwrap_or(XmlState::Off)
+    }
+
+    fn push(&mut self, state: XmlState) {
+        self.stack.push(state)
+    }
+
+    fn pop(&mut self) -> XmlState {
+        self.stack.pop().unwrap_or(XmlState::Off)
     }
 
     fn parse(mut self) -> xml::reader::Result<Tileset> {
@@ -101,33 +148,46 @@ impl<R: io::Read> XmlParser<R> {
                 }) => {
                     self.depth += 1;
 
-                    match self.state {
+                    match self.state() {
                         XmlState::Off => {
                             if name.local_name == XML_NODE_ROOT {
-                                self.state = XmlState::Root;
+                                self.stack.push(XmlState::Root);
                             }
                         }
                         XmlState::Root => {
                             match name.local_name.as_str() {
                                 XML_NODE_TILES => {
-                                    self.state = XmlState::Tiles;
+                                    self.stack.push(XmlState::Tiles);
                                 }
                                 XML_NODE_NEIGHBOURS => {
-                                    self.state = XmlState::Neighbours;
+                                    self.stack.push(XmlState::Neighbours);
                                 }
                                 _ => { /* consume unknown nodes */ }
                             }
                         }
                         XmlState::Tiles => {
-                            self.hande_tile(name, &attributes);
+                            if name.local_name == XML_NODE_TILE {
+                                self.handle_tile(name, &attributes);
+                            }
                         }
                         XmlState::Neighbours => {
-                            self.handle_neighbour(name, &attributes);
+                            if name.local_name == XML_NODE_NEIGHBOUR {
+                                self.handle_neighbour(name, &attributes);
+                            }
                         }
                     }
                 }
-                Ok(XmlEvent::EndElement { .. }) => {
+                Ok(XmlEvent::EndElement { name }) => {
                     self.depth -= 1;
+
+                    match self.state() {
+                        XmlState::Tiles => {
+                            if name.local_name == XML_NODE_TILES {
+                                self.pop();
+                            }
+                        }
+                        _ => { /* do nothing  */ }
+                    }
                 }
                 Ok(XmlEvent::EndDocument) => break,
                 Err(err) if err.kind() == &xml::reader::ErrorKind::UnexpectedEof => {
@@ -144,7 +204,7 @@ impl<R: io::Read> XmlParser<R> {
         Ok(tileset)
     }
 
-    fn hande_tile(&mut self, name: OwnedName, attributes: &[OwnedAttribute]) {
+    fn handle_tile(&mut self, name: OwnedName, attributes: &[OwnedAttribute]) {
         if name.local_name == XML_NODE_TILE {
             // Extract tile name and symmetry
             let mut tilename: Option<&str> = None;
@@ -177,7 +237,7 @@ impl<R: io::Read> XmlParser<R> {
     /// Adds a tile into the set.
     #[rustfmt::skip]
     fn create_tile(&mut self, tilename: &str, symmetry: &str, weight: &str) {
-        log::info!("Create tile: {} {} {}", tilename, symmetry, weight);
+        log::info!("tile: {} {} {}", tilename, symmetry, weight);
 
         // TODO: Return float parse error
         let _weight = weight.parse::<f32>().unwrap();
@@ -223,7 +283,7 @@ impl<R: io::Read> XmlParser<R> {
         self.offsets.insert(tilename.to_string(), offset);
 
         for t in 0..cardinality {
-            let mut map = [0; 8];
+            let mut map = [0; CASE_N];
 
             map[0] = t;
             map[1] = a(t);
@@ -271,7 +331,7 @@ impl<R: io::Read> XmlParser<R> {
             }
         };
 
-        log::info!("neighbours: {}, {}", left.tile(), right.tile());
+        log::info!("neighbours: {}, {}", left, right);
 
         // TODO: Lookup firstOccurence by tilename
         // TODO: If neighbour kind is complex, parse num to usize
