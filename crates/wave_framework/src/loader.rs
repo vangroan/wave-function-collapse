@@ -6,6 +6,8 @@ use xml::{
     reader::{EventReader, XmlEvent},
 };
 
+use crate::option;
+
 /// Load a tileset from the given XML file.
 // TODO: return Result
 pub fn load_tileset_file<P>(filepath: P) -> Option<Tileset>
@@ -54,6 +56,20 @@ enum XmlState {
     Root,
     Tiles,
     Neighbours,
+}
+
+enum NeighKind<'a> {
+    Tile(&'a str),
+    Complex { tile: &'a str, num: &'a str },
+}
+
+impl<'a> NeighKind<'a> {
+    fn tile(&self) -> &str {
+        match self {
+            &NeighKind::Tile(tile) => tile,
+            &NeighKind::Complex { tile, .. } => tile,
+        }
+    }
 }
 
 struct XmlParser<R: io::Read> {
@@ -105,7 +121,9 @@ impl<R: io::Read> XmlParser<R> {
                         XmlState::Tiles => {
                             self.hande_tile(name, &attributes);
                         }
-                        XmlState::Neighbours => {}
+                        XmlState::Neighbours => {
+                            self.handle_neighbour(name, &attributes);
+                        }
                     }
                 }
                 Ok(XmlEvent::EndElement { .. }) => {
@@ -162,7 +180,7 @@ impl<R: io::Read> XmlParser<R> {
         log::info!("Create tile: {} {} {}", tilename, symmetry, weight);
 
         // TODO: Return float parse error
-        let weight = weight.parse::<f32>().unwrap();
+        let _weight = weight.parse::<f32>().unwrap();
 
         let cardinality: i32;
         let a: &dyn Fn(i32) -> i32;
@@ -224,5 +242,63 @@ impl<R: io::Read> XmlParser<R> {
         }
 
         // TODO: Load bitmap
+    }
+
+    fn handle_neighbour(&mut self, _name: OwnedName, attributes: &[OwnedAttribute]) {
+        // Text in the left and right attributes encode two values:
+        // a tile name and a case number (related to 'cardinality')
+        let left = match attributes
+            .iter()
+            .find(|attr| attr.name.local_name == XML_ATTR_LEFT)
+            .and_then(extract_neighbour)
+        {
+            Some(neigh) => neigh,
+            None => {
+                log::warn!("neighbour left not found");
+                return;
+            }
+        };
+
+        let right = match attributes
+            .iter()
+            .find(|attr| attr.name.local_name == XML_ATTR_RIGHT)
+            .and_then(extract_neighbour)
+        {
+            Some(neigh) => neigh,
+            None => {
+                log::warn!("neighbour right not found");
+                return;
+            }
+        };
+
+        log::info!("neighbours: {}, {}", left.tile(), right.tile());
+
+        // TODO: Lookup firstOccurence by tilename
+        // TODO: If neighbour kind is complex, parse num to usize
+        // TODO: use num to lookup action
+    }
+}
+
+/// Extract tile and case number from neighbour attribute,
+/// either the `left` or `right` value.
+///
+/// The text encodes tile information like the following:
+///
+///     "{tile} {num}"
+///
+/// The first `tile` part is required. The second `num` part is optional.
+///
+/// If the `tile` part is not present, `None` is returned.
+#[inline]
+fn extract_neighbour(attr: &OwnedAttribute) -> Option<NeighKind> {
+    let mut parts = attr.value.split_whitespace().filter(|s| !s.is_empty());
+
+    let tile = parts.next();
+    let num = parts.next();
+
+    match (tile, num) {
+        (Some(tile), Some(num)) => Some(NeighKind::Complex { tile, num }),
+        (Some(tile), None) => Some(NeighKind::Tile(tile)),
+        (None, None) | _ => None,
     }
 }

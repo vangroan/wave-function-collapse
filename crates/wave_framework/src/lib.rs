@@ -1,6 +1,7 @@
 use eframe::egui;
 
 mod loader;
+mod option;
 
 pub use loader::load_tileset_file;
 
