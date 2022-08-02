@@ -9,19 +9,22 @@ use xml::{
 
 /// Load a tileset from the given XML file.
 // TODO: return Result
-pub fn load_tileset_file<P>(filepath: P) -> Option<Tileset>
+pub fn load_tileset_file<P>(filepath: P) -> Option<()>
 where
     P: AsRef<Path>,
 {
     let file = fs::File::open(filepath).unwrap();
     let reader = io::BufReader::new(file);
-    match XmlParser::new(reader).parse() {
-        Ok(tileset) => Some(tileset),
+    let result = match XmlParser::new(reader).parse() {
+        Ok(data) => Some(data),
         Err(err) => {
             log::error!("tileset parse error: {}", err);
             None
         }
-    }
+    };
+    log::info!("{:#?}", result);
+
+    Some(())
 }
 
 const XML_NODE_ROOT: &str = "set";
@@ -29,6 +32,7 @@ const XML_NODE_TILES: &str = "tiles";
 const XML_NODE_TILE: &str = "tile";
 const XML_NODE_NEIGHBOURS: &str = "neighbors";
 const XML_NODE_NEIGHBOUR: &str = "neighbor";
+const XML_NODE_SUBSETS: &str = "subsets";
 const XML_ATTR_NAME: &str = "name";
 const XML_ATTR_SYMMERTY: &str = "symmetry";
 const XML_ATTR_WEIGHT: &str = "weight";
@@ -51,11 +55,27 @@ const DIRECTION_N: usize = 4;
 const CASE_N: usize = DIRECTION_N * 2;
 
 #[derive(Default)]
-pub struct Tileset {
-    tiles: Vec<Tile>,
+pub struct Tileset {}
+
+/// Data transfer object for XML contents.
+#[derive(Debug)]
+pub struct Data {
+    tiles: Vec<TileData>,
+    neighbours: Vec<NeighData>,
+    subsets: (), // TODO: Subsets
 }
 
-pub struct Tile {}
+#[derive(Debug)]
+pub struct TileData {
+    name: String,
+    symmetry: String,
+}
+
+#[derive(Debug)]
+pub struct NeighData {
+    left: String,
+    right: String,
+}
 
 /// Current state of the parser as it traverses the XML tree.
 #[derive(Clone, Copy)]
@@ -64,6 +84,7 @@ enum XmlState {
     Root,
     Tiles,
     Neighbours,
+    Subsets,
 }
 
 enum NeighKind<'a> {
@@ -140,7 +161,11 @@ impl<R: io::Read> XmlParser<R> {
         self.stack.pop().unwrap_or(XmlState::Off)
     }
 
-    fn parse(mut self) -> xml::reader::Result<Tileset> {
+    fn parse(mut self) -> xml::reader::Result<Data> {
+        let mut tiles = vec![];
+        let mut neighbours = vec![];
+        let subsets = ();
+
         loop {
             match self.reader.next() {
                 Ok(XmlEvent::StartElement {
@@ -162,18 +187,36 @@ impl<R: io::Read> XmlParser<R> {
                                 XML_NODE_NEIGHBOURS => {
                                     self.stack.push(XmlState::Neighbours);
                                 }
+                                XML_NODE_SUBSETS => {
+                                    log::warn!("subsets not implemented yet");
+                                }
                                 _ => { /* consume unknown nodes */ }
                             }
                         }
                         XmlState::Tiles => {
                             if name.local_name == XML_NODE_TILE {
-                                self.handle_tile(name, &attributes);
+                                let (name, symmetry) =
+                                    attributes.take_attr2(XML_ATTR_NAME, XML_ATTR_SYMMERTY);
+
+                                tiles.push(TileData {
+                                    name: name.value,
+                                    symmetry: symmetry.value,
+                                });
                             }
                         }
                         XmlState::Neighbours => {
                             if name.local_name == XML_NODE_NEIGHBOUR {
-                                self.handle_neighbour(name, &attributes);
+                                let (left, right) =
+                                    attributes.take_attr2(XML_ATTR_LEFT, XML_ATTR_RIGHT);
+
+                                neighbours.push(NeighData {
+                                    left: left.value,
+                                    right: right.value,
+                                });
                             }
+                        }
+                        XmlState::Subsets => {
+                            log::warn!("subsets not implemented yet");
                         }
                     }
                 }
@@ -181,10 +224,11 @@ impl<R: io::Read> XmlParser<R> {
                     self.depth -= 1;
 
                     match self.state() {
-                        XmlState::Tiles => {
-                            if name.local_name == XML_NODE_TILES {
-                                self.pop();
-                            }
+                        XmlState::Tiles if name.local_name == XML_NODE_TILES => {
+                            self.pop();
+                        }
+                        XmlState::Neighbours if name.local_name == XML_NODE_NEIGHBOURS => {
+                            self.pop();
                         }
                         _ => { /* do nothing  */ }
                     }
@@ -199,9 +243,11 @@ impl<R: io::Read> XmlParser<R> {
             }
         }
 
-        let Self { tileset, .. } = self;
-
-        Ok(tileset)
+        Ok(Data {
+            tiles,
+            neighbours,
+            subsets,
+        })
     }
 
     fn handle_tile(&mut self, name: OwnedName, attributes: &[OwnedAttribute]) {
@@ -331,9 +377,14 @@ impl<R: io::Read> XmlParser<R> {
             }
         };
 
-        log::info!("neighbours: {}, {}", left, right);
+        log::info!("neighbour: {}, {}", left, right);
 
-        // TODO: Lookup firstOccurence by tilename
+        // TODO: Skip subset ``subset != null && (!subset.Contains(left[0]) || !subset.Contains(right[0]))``
+        let offset = self.offsets[left.tile()];
+        let l = self.action[offset][left.num()];
+        let d = self.action[l as usize][1]; // Why 1?
+        log::info!("offset={} L={} D={}", offset, l, d);
+
         // TODO: If neighbour kind is complex, parse num to usize
         // TODO: use num to lookup action
     }
@@ -360,5 +411,44 @@ fn extract_neighbour(attr: &OwnedAttribute) -> Option<NeighKind> {
         (Some(tile), Some(num)) => Some(NeighKind::Complex { tile, num }),
         (Some(tile), None) => Some(NeighKind::Tile(tile)),
         (None, None) | _ => None,
+    }
+}
+
+/// Utility that consumes the node attributes and returns
+/// a tuple of the found ones.
+///
+/// Takes two attribute names to search for.
+///
+/// Panics if any attributes with the given names aren't found.
+// TODO: Replace panic with error
+trait TakeAttr {
+    fn take_attr2(self, a: &str, b: &str) -> (OwnedAttribute, OwnedAttribute);
+}
+
+impl TakeAttr for Vec<OwnedAttribute> {
+    #[inline]
+    fn take_attr2(self, a: &str, b: &str) -> (OwnedAttribute, OwnedAttribute) {
+        let mut attr_a = None;
+        let mut attr_b = None;
+
+        for attr in self {
+            let name = attr.name.local_name.as_str();
+            if name == a {
+                attr_a = Some(attr);
+            } else if name == b {
+                attr_b = Some(attr);
+            }
+        }
+
+        (attr_a.unwrap(), attr_b.unwrap())
+    }
+}
+
+/// Build a tileset from the given XML data.
+pub struct TilesetBuilder {}
+
+impl TilesetBuilder {
+    pub fn new(_data: Data) -> TilesetBuilder {
+        todo!()
     }
 }
